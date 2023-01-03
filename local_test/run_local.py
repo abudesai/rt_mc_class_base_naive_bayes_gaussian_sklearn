@@ -1,19 +1,8 @@
-#!/usr/bin/env python3
-# coding: utf-8
-"""
-    :brief: this script is useful for doing the algorithm testing locally without needing
-    to build the docker image and run the container.
-    make sure you create your virtual environment, install the dependencies
-    from requirements.txt file, and then use that virtual env to do your testing.
-    This isnt foolproof. You can still have host os, or python-version related issues, so beware.
-"""
-import os
-import shutil
+import os, shutil
 import sys
 import time
-
-import numpy as np
-import pandas as pd
+import pandas as pd, numpy as np
+import pprint
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -23,12 +12,13 @@ from sklearn.metrics import (
 )
 
 sys.path.insert(0, "./../app")
-import algorithm.model.mc_classifier as mc_classifier
-import algorithm.model_server as model_server
+import algorithm.utils as utils
 import algorithm.model_trainer as model_trainer
+import algorithm.model_server as model_server
 import algorithm.model_tuner as model_tuner
 import algorithm.preprocessing.pipeline as pipeline
-import algorithm.utils as utils
+import algorithm.model.mc_classifier as mc_classifier
+
 
 inputs_path = "./ml_vol/inputs/"
 
@@ -57,7 +47,17 @@ if not os.path.exists(test_results_path):
 
 
 # change this to whereever you placed your local testing datasets
-local_datapath = os.getenv("LOCAL_DATAPATH", "./../../datasets")
+local_datapath = "./../../datasets"
+
+
+"""
+this script is useful for doing the algorithm testing locally without needing 
+to build the docker image and run the container.
+make sure you create your virtual environment, install the dependencies
+from requirements.txt file, and then use that virtual env to do your testing. 
+This isnt foolproof. You can still have host os, or python-version related issues, so beware.
+"""
+
 model_name = mc_classifier.MODEL_NAME
 
 
@@ -147,25 +147,31 @@ def train_and_save_algo():
     print("done with training")
 
 
-def load_and_test_algo(dataset_name: str):
+def load_and_test_algo():
     # Read data
     test_data = utils.get_data(test_data_path)
     # read data config
     data_schema = utils.get_data_schema(data_schema_path)
     # instantiate the trained model
-    predictor = model_server.ModelServer(model_artifacts_path)
+    predictor = model_server.ModelServer(model_artifacts_path, data_schema)
     # make predictions
-    predictions = predictor.predict_proba(test_data, data_schema)
+    predictions = predictor.predict_proba(test_data)
     # save predictions
     utils.save_dataframe(predictions, testing_outputs_path, "test_predictions.csv")
+    # local explanations
+    if hasattr(predictor, "has_local_explanations"):
+        # will only return explanations for max 5 rows - will select the top 5 if given more rows
+        local_explanations = predictor.explain_local(test_data)
+    else:
+        local_explanations = None
     # score the results
-    test_key = get_test_key(dataset_name)
+    test_key = get_test_key()
     results = score(test_key, predictions, data_schema)
     print("done with predictions")
-    return results
+    return results, local_explanations
 
 
-def get_test_key(dataset_name: str) -> pd.DataFrame:
+def get_test_key():
     test_key = pd.read_csv(
         f"{local_datapath}/{dataset_name}/{dataset_name}_test_key.csv"
     )
@@ -248,6 +254,15 @@ def save_test_outputs(results, run_hpt, dataset_name):
     df.to_csv(file_path_and_name, index=False)
 
 
+
+def save_local_explanations(local_explanations, dataset_name):
+    if local_explanations is not None:
+        fname = f"{model_name}_{dataset_name}_local_explanations.json"
+        file_path_and_name = os.path.join(test_results_path, fname)
+        with open(file_path_and_name, "w") as f:
+            f.writelines(local_explanations)
+
+
 def get_file_path_and_name(run_hpt, dataset_name):
     if dataset_name is None:
         fname = (
@@ -275,8 +290,8 @@ def run_train_and_test(dataset_name, run_hpt, num_hpt_trials):
     train_and_save_algo()  # train the model and save
 
     # set_scoring_vars(dataset_name=dataset_name)
-    results = load_and_test_algo(
-        dataset_name
+    results, local_explanations = (
+        load_and_test_algo()
     )  # load the trained model and get predictions on test data
 
     end = time.time()
@@ -292,13 +307,15 @@ def run_train_and_test(dataset_name, run_hpt, num_hpt_trials):
     }
 
     print(f"Done with dataset in {elapsed_time_in_minutes} minutes.")
-    return results
+    return results, local_explanations
 
 
-def main():
-    num_hpt_trials = 30
+if __name__ == "__main__":
+
+    num_hpt_trials = 10
     run_hpt_list = [False, True]
     run_hpt_list = [False]
+
     datasets = [
         "dna_splice_junction",
         "gesture_phase",
@@ -311,20 +328,17 @@ def main():
         "steel_plate_fault",
         "vehicle_silhouettes",
     ]
-    # datasets = ["primary_tumor"]
+    datasets = ["ipums_census_small"]
 
     for run_hpt in run_hpt_list:
         all_results = []
         for dataset_name in datasets:
             print("-" * 60)
             print(f"Running dataset {dataset_name}")
-            results = run_train_and_test(dataset_name, run_hpt, num_hpt_trials)
+            results, local_explanations = run_train_and_test(dataset_name, run_hpt, num_hpt_trials)
             save_test_outputs(results, run_hpt, dataset_name)
+            save_local_explanations(local_explanations, dataset_name)
             all_results.append(results)
             print("-" * 60)
 
         save_test_outputs(all_results, run_hpt, dataset_name=None)
-
-
-if __name__ == "__main__":
-    main()
